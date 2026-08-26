@@ -16,6 +16,9 @@ icloud_storage_state.json
 # Pinterest session state (contains live Pinterest auth cookies)
 pinterest_storage_state.json
 
+# Persistent browser profile (PINTEREST_USER_DATA_DIR), holds live cookies
+chrome_profile/
+
 # Local env files
 .env
 .env.*

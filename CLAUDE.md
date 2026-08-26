@@ -30,9 +30,30 @@ by an agent. Do not "fix" it into headless mode.
 
 ## Architecture
 
-**Phase 1 — scrape (`SCRAPER_BROWSER_ENGINES`)**: tries firefox, falls back to chromium; each engine also retries across
+**Phase 1 — scrape (`SCRAPER_BROWSER_ENGINES`)**: a comma-separated list read from the environment, default
+`chromium:chrome,firefox,chromium`, tried in order until one loads the board; each engine also retries across
 `www.pinterest.com` / `nl.pinterest.com` host variants (`build_board_url_variants`, `open_board_with_retries`).
-Pinterest blocks inconsistently per engine/host, which is why both fallback layers exist.
+Pinterest blocks inconsistently per engine/host, which is why both fallback layers exist. An entry may be
+`<engine>:<channel>`; the channel is passed straight to `launch()`. **Playwright only supports channels on chromium**
+(`chrome`, `msedge`, and beta/dev/canary variants) — there is no way to drive a normal Firefox install, because
+Playwright's Firefox is a patched build carrying the Juggler protocol. Branded Chrome leads the default list because
+Pinterest's login flow rejects Playwright's bundled builds more often than a real Chrome install; a machine without
+Chrome just falls through to the bundled engines via the existing `except`.
+
+`start_pinterest_session` owns all of phase 1's browser setup and returns `(browser, context, page, owns_browser)`.
+Chromium launches pass `CHROMIUM_STEALTH_LAUNCH_KWARGS` (`ignore_default_args=["--enable-automation"]` +
+`--disable-blink-features=AutomationControlled`), which is what makes `navigator.webdriver` read `False`; Pinterest's
+login form rejects browsers that advertise automation, so **keep those flags** on any chromium launch. Two env vars
+bypass the engine list entirely when sign-in still fails:
+
+- `PINTEREST_CDP_URL` — `connect_over_cdp` onto a Chrome the user started with `--remote-debugging-port`. It reuses
+  `browser.contexts[0]` and its existing page rather than making new ones, because the signed-in profile is the whole
+  point. `owns_browser` comes back **False** so the teardown never closes the user's own browser.
+- `PINTEREST_USER_DATA_DIR` — `launch_persistent_context` on a profile dir. A persistent context *is* the context, so
+  `storage_state` is neither passed nor needed; the profile dir holds the cookies. It uses only the first entry of
+  `SCRAPER_BROWSER_ENGINES` — a profile dir is engine-specific, so there is no fallback chain.
+
+`PINTEREST_CDP_URL` wins if both are set.
 
 Each engine gets an explicit `browser.new_context(**load_pinterest_context_kwargs())` — **not** `browser.new_page()`,
 which would always start logged out and get the signup wall instead of the board. `ensure_pinterest_board_access` then
@@ -94,6 +115,18 @@ duplicate prompt and album lookup carry Dutch label variants alongside English.
 
 iCloud does not paint a progress indicator immediately, so `ICLOUD_UPLOAD_START_GRACE_SECONDS` stops the quiet-poll
 heuristic concluding "done" during the first seconds and closing the browser mid-transfer.
+
+Files go over in batches of `ICLOUD_UPLOAD_BATCH_SIZE` (default 10, env-overridable) rather than one
+`set_input_files` call with the whole list, and each batch waits for `wait_for_icloud_upload_completion` before the
+next. One 50-file call uploaded only 11: iCloud walks that `FileList` lazily, so a re-render of the input, or the
+quiet-poll heuristic firing in a gap between files, silently drops the untouched tail. Batching bounds that loss and
+keeps a wrong "done" from costing more than one batch. `wait_for_icloud_upload_completion` takes
+`start_grace_seconds` so only batch 1 pays the full `ICLOUD_UPLOAD_START_GRACE_SECONDS`; later batches use the
+shorter `ICLOUD_UPLOAD_BATCH_GRACE_SECONDS`, since the uploader has provably painted by then.
+`ICLOUD_UPLOAD_STABLE_POLLS` is 10 (~20s quiet) for the same reason — the progress ring blinks out between files.
+
+`ICLOUD_CONFIRM_BEFORE_CLOSE` ends the phase on an `input()` instead of a heuristic. Closing the browser is the only
+thing that actually kills an in-flight upload, so the last word belongs to the user, not to the poller.
 
 `ICLOUD_ALBUM_URL` is empty by default and set from the environment when you want a deep link to a specific album. If
 the page doesn't resolve to an album view (`/#/a,` in the URL), the code falls back to `open_or_create_album`

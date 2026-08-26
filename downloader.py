@@ -22,13 +22,40 @@ BOARD_URL = os.environ.get("PINTEREST_BOARD_URL", "https://www.pinterest.com/Raa
 BOARD_GOTO_TIMEOUT_MS = 45000
 BOARD_GOTO_RETRIES = 3
 BOARD_RETRY_DELAY_SECONDS = 2
-SCRAPER_BROWSER_ENGINES = ("firefox", "chromium")
+# Engines are tried in order until one loads the board. An entry may name a
+# branded channel as "<engine>:<channel>" (Playwright only ships channels for
+# chromium: chrome, msedge, and their beta/dev/canary variants). Real Chrome
+# passes Pinterest's login checks that Playwright's bundled builds trip, so it
+# leads; Playwright's own Firefox/Chromium stay as fallbacks. Playwright cannot
+# drive a normal Firefox install — its Firefox is a patched build.
+SCRAPER_BROWSER_ENGINES = tuple(
+    entry.strip()
+    for entry in os.environ.get(
+        "SCRAPER_BROWSER_ENGINES", "chromium:chrome,firefox,chromium"
+    ).split(",")
+    if entry.strip()
+)
 # Pinterest serves a signup/login wall to logged-out visitors instead of the
 # board, so the scraper caches its session the same way the iCloud phase does.
 PINTEREST_STORAGE_STATE_FILE = Path(
     os.environ.get("PINTEREST_STORAGE_STATE_FILE") or BASE_DIR / "pinterest_storage_state.json"
 )
 PINTEREST_LOGIN_WAIT_ENABLED = True
+# Pinterest's login form rejects browsers that advertise automation, so the
+# chromium launches drop the automation flags below. Two stronger escapes exist
+# when the sign-in still fails:
+#   PINTEREST_USER_DATA_DIR - a persistent Chrome profile dir. Sign in once and
+#       the profile keeps the session; no storage-state file is involved.
+#   PINTEREST_CDP_URL - attach to a Chrome you started yourself with
+#       --remote-debugging-port=9222, i.e. your everyday profile that is
+#       already signed in. Nothing about it looks automated at startup.
+# PINTEREST_CDP_URL wins if both are set; either one skips SCRAPER_BROWSER_ENGINES.
+PINTEREST_USER_DATA_DIR = os.environ.get("PINTEREST_USER_DATA_DIR", "")
+PINTEREST_CDP_URL = os.environ.get("PINTEREST_CDP_URL", "")
+CHROMIUM_STEALTH_LAUNCH_KWARGS = {
+    "ignore_default_args": ["--enable-automation"],
+    "args": ["--disable-blink-features=AutomationControlled"],
+}
 PINTEREST_BOARD_READY_TIMEOUT_MS = 20000
 MAX_SCROLLS = 100
 STALL_LIMIT = 3
@@ -54,8 +81,19 @@ ICLOUD_STORAGE_STATE_FILE = Path(
 )
 ICLOUD_UPLOAD_WAIT_TIMEOUT_SECONDS = 900
 ICLOUD_UPLOAD_POLL_SECONDS = 2
-ICLOUD_UPLOAD_STABLE_POLLS = 5
+# Quiet polls before the transfer is called done. iCloud's progress ring blinks
+# out between files, so a short streak reads a gap as "finished" and the browser
+# closes on top of the remaining queue.
+ICLOUD_UPLOAD_STABLE_POLLS = 10
 ICLOUD_UPLOAD_START_GRACE_SECONDS = 30
+ICLOUD_UPLOAD_BATCH_GRACE_SECONDS = 15
+# Files are handed over in batches instead of one giant set_input_files call:
+# iCloud walks the FileList lazily, so anything re-rendering that input mid-run
+# takes the untouched tail of the list with it.
+ICLOUD_UPLOAD_BATCH_SIZE = max(1, int(os.environ.get("ICLOUD_UPLOAD_BATCH_SIZE", "10")))
+# The browser closing is what actually loses an in-flight upload, so the run
+# ends on a manual confirmation rather than on a heuristic.
+ICLOUD_CONFIRM_BEFORE_CLOSE = True
 ICLOUD_FILE_INPUT_WAIT_SECONDS = 30
 DOWNLOAD_TIMEOUT_SECONDS = 30
 DOWNLOAD_CHUNK_BYTES = 65536
@@ -316,6 +354,74 @@ def load_pinterest_context_kwargs():
 
     print(f"Reusing saved Pinterest session: {state_path}")
     return {"storage_state": str(state_path)}
+
+
+def scraper_launch_kwargs(engine_name, channel):
+    kwargs = {"headless": False}
+    if channel:
+        kwargs["channel"] = channel
+    if engine_name == "chromium":
+        kwargs.update(CHROMIUM_STEALTH_LAUNCH_KWARGS)
+    return kwargs
+
+
+def start_pinterest_session(playwright):
+    """Open the board however the environment says to.
+
+    Returns (browser, context, page, owns_browser). owns_browser is False when
+    we attached to a Chrome the user started, which must outlive this script.
+    """
+    if PINTEREST_CDP_URL:
+        print(f"Attaching to the Chrome already running at {PINTEREST_CDP_URL}.")
+        browser = playwright.chromium.connect_over_cdp(PINTEREST_CDP_URL)
+        # An attached Chrome already has a window open; reuse it so the run
+        # lands in the profile that is signed in rather than a blank context.
+        context = browser.contexts[0] if browser.contexts else browser.new_context()
+        page = context.pages[0] if context.pages else context.new_page()
+        open_board_with_retries(page, BOARD_URL)
+        ensure_pinterest_board_access(context, page)
+        return browser, context, page, False
+
+    if PINTEREST_USER_DATA_DIR:
+        profile_dir = Path(PINTEREST_USER_DATA_DIR)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Using the persistent Chrome profile at {profile_dir}.")
+        engine_name, _, channel = SCRAPER_BROWSER_ENGINES[0].partition(":")
+        # A persistent context is its own context: storage_state is neither
+        # accepted nor needed, the profile dir already holds the cookies.
+        context = getattr(playwright, engine_name).launch_persistent_context(
+            str(profile_dir), **scraper_launch_kwargs(engine_name, channel)
+        )
+        page = context.pages[0] if context.pages else context.new_page()
+        open_board_with_retries(page, BOARD_URL)
+        ensure_pinterest_board_access(context, page)
+        return context.browser, context, page, True
+
+    launch_errors = []
+    for engine_spec in SCRAPER_BROWSER_ENGINES:
+        engine_name, _, channel = engine_spec.partition(":")
+        browser = None
+        try:
+            browser_type = getattr(playwright, engine_name)
+            browser = browser_type.launch(**scraper_launch_kwargs(engine_name, channel))
+            # An explicit context is what lets the saved Pinterest cookies load;
+            # browser.new_page() would always start logged out.
+            context = browser.new_context(**load_pinterest_context_kwargs())
+            page = context.new_page()
+            open_board_with_retries(page, BOARD_URL)
+            ensure_pinterest_board_access(context, page)
+            print(f"Using {engine_spec} for Pinterest scraping.")
+            return browser, context, page, True
+        except Exception as engine_error:
+            launch_errors.append(f"{engine_spec}: {engine_error}")
+            print(f"{engine_spec} failed for board navigation; trying next browser engine.")
+            if browser:
+                browser.close()
+
+    raise RuntimeError(
+        "Could not start scraping in any browser engine. "
+        f"Errors: {' | '.join(launch_errors)}"
+    )
 
 
 def save_pinterest_state(context):
@@ -683,7 +789,7 @@ def accept_icloud_duplicate_prompt(page):
     return False
 
 
-def wait_for_icloud_upload_completion(page):
+def wait_for_icloud_upload_completion(page, start_grace_seconds=ICLOUD_UPLOAD_START_GRACE_SECONDS):
     start = time.monotonic()
     deadline = start + ICLOUD_UPLOAD_WAIT_TIMEOUT_SECONDS
     stable_polls = 0
@@ -710,7 +816,7 @@ def wait_for_icloud_upload_completion(page):
             # iCloud takes a moment to render its first progress indicator. Without
             # this grace window the very first polls look idle, the browser closes
             # and the transfer is killed before it ever started.
-            grace_over = time.monotonic() - start >= ICLOUD_UPLOAD_START_GRACE_SECONDS
+            grace_over = time.monotonic() - start >= start_grace_seconds
             if stable_polls >= ICLOUD_UPLOAD_STABLE_POLLS and (saw_activity or grace_over):
                 if saw_activity:
                     print("iCloud upload appears finished.")
@@ -763,16 +869,40 @@ def upload_to_icloud_album(playwright, file_paths):
             if not album_ready:
                 print("Could not reliably open/create the iCloud album; uploading to library view instead.")
 
-        if not upload_files_to_icloud_page(page, file_paths):
-            print("Warning: Could not trigger iCloud file upload automatically.")
-            print("This run avoids clicking Upload automatically to prevent OS file-dialog popups.")
-            print("If needed, upload manually in iCloud Photos.")
-            return
+        batches = [
+            file_paths[start:start + ICLOUD_UPLOAD_BATCH_SIZE]
+            for start in range(0, len(file_paths), ICLOUD_UPLOAD_BATCH_SIZE)
+        ]
+        handed_over = 0
 
-        accept_icloud_duplicate_prompt(page)
+        for batch_number, batch in enumerate(batches, start=1):
+            print(f"Uploading batch {batch_number}/{len(batches)} ({len(batch)} files)...")
 
-        print("Upload started in iCloud Photos. Waiting for upload completion...")
-        wait_for_icloud_upload_completion(page)
+            if not upload_files_to_icloud_page(page, batch):
+                print("Warning: Could not trigger iCloud file upload automatically.")
+                print("This run avoids clicking Upload automatically to prevent OS file-dialog popups.")
+                print(f"{handed_over}/{len(file_paths)} files were handed to iCloud before this failed.")
+                print("If needed, upload the rest manually from the downloads/ folder.")
+                break
+
+            accept_icloud_duplicate_prompt(page)
+
+            # Only the first batch needs the full grace window; by the second one
+            # iCloud has already painted its uploader at least once.
+            wait_for_icloud_upload_completion(
+                page,
+                start_grace_seconds=(
+                    ICLOUD_UPLOAD_START_GRACE_SECONDS
+                    if batch_number == 1
+                    else ICLOUD_UPLOAD_BATCH_GRACE_SECONDS
+                ),
+            )
+            handed_over += len(batch)
+            print(f"{handed_over}/{len(file_paths)} files handed to iCloud.")
+
+        if ICLOUD_CONFIRM_BEFORE_CLOSE:
+            print("Check the album in the open browser; anything still uploading dies when it closes.")
+            input("Press Enter to close the iCloud browser...")
     finally:
         context.close()
         browser.close()
@@ -782,37 +912,7 @@ with sync_playwright() as p:
     clear_downloads_dir(DOWNLOADS_DIR)
     init_image_log()
 
-    browser = None
-    context = None
-    page = None
-    launch_errors = []
-
-    for engine_name in SCRAPER_BROWSER_ENGINES:
-        try:
-            browser_type = getattr(p, engine_name)
-            browser = browser_type.launch(headless=False)
-            # An explicit context is what lets the saved Pinterest cookies load;
-            # browser.new_page() would always start logged out.
-            context = browser.new_context(**load_pinterest_context_kwargs())
-            page = context.new_page()
-            open_board_with_retries(page, BOARD_URL)
-            ensure_pinterest_board_access(context, page)
-            print(f"Using {engine_name} for Pinterest scraping.")
-            break
-        except Exception as engine_error:
-            launch_errors.append(f"{engine_name}: {engine_error}")
-            print(f"{engine_name} failed for board navigation; trying next browser engine.")
-            if browser:
-                browser.close()
-            browser = None
-            context = None
-            page = None
-
-    if not page:
-        raise RuntimeError(
-            "Could not start scraping in any browser engine. "
-            f"Errors: {' | '.join(launch_errors)}"
-        )
+    browser, context, page, owns_browser = start_pinterest_session(p)
 
     downloads = {}
     seen_image_urls = set()
@@ -935,7 +1035,12 @@ with sync_playwright() as p:
             if not saved:
                 print(f"Failed all candidates for {pin_key}: {last_error}")
     finally:
-        browser.close()
+        # An attached Chrome belongs to the user; closing it would kill their
+        # session and the window they signed in with.
+        if owns_browser:
+            context.close()
+            if browser:
+                browser.close()
 
     if ICLOUD_UPLOAD_ENABLED:
         upload_to_icloud_album(p, downloaded_files)

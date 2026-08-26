@@ -15,7 +15,7 @@ python downloader.py
 
 ## What it does
 
-1. Opens the board in Firefox, falling back to Chromium and to the `nl.pinterest.com` host if Pinterest blocks the
+1. Opens the board in your installed Google Chrome, falling back to Playwright's bundled Firefox and Chromium and to the `nl.pinterest.com` host if Pinterest blocks the
    first attempt. If Pinterest answers with its signup wall instead of the board, the run pauses for you to sign in
    and then caches the session.
 2. Scrolls the board and collects pin images, stopping at the recommendation feeds (`Find some ideas for this board`,
@@ -74,7 +74,31 @@ That file holds live Pinterest cookies. It is gitignored, and `PINTEREST_STORAGE
 repo. Delete it if the session goes stale and you want to be prompted again. `PINTEREST_LOGIN_WAIT_ENABLED = False` in
 `downloader.py` turns the pause into a hard error instead, for unattended runs with a known-good session file.
 
+### If the sign-in itself fails
+
+Pinterest sometimes refuses to log you in inside an automated browser at all — the form loops, or you get a generic
+error. Chromium is already launched without the automation flags (`navigator.webdriver` reads `False`), but if that is
+not enough, set one of these in `.env` and skip the automated browser entirely:
+
+- `PINTEREST_USER_DATA_DIR=C:/Users/<you>/.pinterest-downloader-chrome` — a persistent Chrome profile. Sign in once;
+  the profile keeps the session for every later run, and no storage-state file is involved.
+- `PINTEREST_CDP_URL=http://localhost:9222` — attach to a Chrome you started yourself:
+
+  ```powershell
+  & "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
+  ```
+
+  Sign in to Pinterest in that window like you normally would, leave it open, then run the script. It drives your real
+  browser and never closes it. Chrome must be fully quit before that command, or it just opens a tab in the running
+  instance without the debugging port.
+
+`PINTEREST_CDP_URL` wins if both are set.
+
 ## iCloud notes
+
+Files upload in batches of 10 (`ICLOUD_UPLOAD_BATCH_SIZE` in `.env`), and the script waits for each batch before
+sending the next. Handing iCloud one big selection loses the tail of the list. The run ends by asking you to press
+Enter before the browser closes — closing it early is what kills an upload still in flight, so check the album first.
 
 - On the first run the script opens iCloud Photos and waits for you to sign in, then press Enter in the terminal.
 - The session is saved to `icloud_storage_state.json` so later runs skip the login. That file holds live Apple auth
