@@ -53,7 +53,7 @@ THUMBNAIL_PATH_HINTS = (
     "/30x30_RS/",
     "/15x15_RS/",
 )
-BOARD_PIN_COUNT_RE = re.compile(r"\b(\d+)\s+Pins?\b", re.IGNORECASE)
+BOARD_PIN_COUNT_RE = re.compile(r"\b(\d[\d.,]*)\s*([km])?\s+Pins?\b", re.IGNORECASE)
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
 
 
@@ -191,8 +191,14 @@ def extract_expected_pin_count(page):
     if not match:
         return None
 
+    # Pinterest abbreviates large boards ("1.2k Pins"). Rounding that back up to
+    # an exact target would stop the scroll early, so let the stall detection run.
+    if match.group(2):
+        print(f"Board pin count is approximate ({match.group(0).strip()}); relying on stall detection.")
+        return None
+
     try:
-        return int(match.group(1))
+        return int(match.group(1).replace(",", "").replace(".", ""))
     except Exception:
         return None
 
@@ -320,6 +326,10 @@ def suggestion_boundary_visible(page):
             return True
 
     return False
+
+
+def runtime_exceeded(start_time):
+    return time.monotonic() - start_time > MAX_RUNTIME_SECONDS
 
 
 def current_cutoff_y(page, cutoff_lock_y):
@@ -693,7 +703,7 @@ with sync_playwright() as p:
         cutoff_lock_y = None
 
         for iteration in range(MAX_SCROLLS):
-            if time.monotonic() - start_time > MAX_RUNTIME_SECONDS:
+            if runtime_exceeded(start_time):
                 print("Stopping because the runtime safety limit was reached.")
                 break
 
@@ -710,6 +720,9 @@ with sync_playwright() as p:
 
             remaining_scroll = SCROLL_STEP
             while remaining_scroll > 0:
+                if runtime_exceeded(start_time):
+                    break
+
                 jump = min(SCROLL_INCREMENT, remaining_scroll)
                 page.evaluate(f"window.scrollBy(0, {jump})")
                 remaining_scroll -= jump
@@ -731,6 +744,10 @@ with sync_playwright() as p:
                     cutoff_y=cutoff_y,
                     iteration=iteration,
                 )
+
+            if runtime_exceeded(start_time):
+                print("Stopping because the runtime safety limit was reached.")
+                break
 
             # One extra settle phase helps capture late-rendered masonry tiles.
             for _ in range(SCROLL_SETTLE_CHECKS):
