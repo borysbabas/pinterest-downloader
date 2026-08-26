@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Downloaded board images
+downloads/
+
+# Logs
+*.log
+
+# iCloud session state (contains live Apple auth cookies)
+icloud_storage_state.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
