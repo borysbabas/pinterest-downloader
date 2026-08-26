@@ -209,31 +209,36 @@ def open_board_with_retries(page, board_url):
     )
 
 
+# Collected in one round-trip: the board holds hundreds of tiles and this runs
+# several times per scroll step, so a per-element evaluate is far too chatty.
+COLLECT_IMAGES_SCRIPT = """
+() => Array.from(document.querySelectorAll('img[src]')).map((el) => {
+    let pin = el.closest('a[href*="/pin/"]');
+    if (!pin) {
+        const card = el.closest('[data-test-id*="pin"], [data-grid-item], [role="listitem"], article');
+        if (card) {
+            pin = card.querySelector('a[href*="/pin/"]');
+        }
+    }
+    const rect = el.getBoundingClientRect();
+    return {
+        pinHref: pin ? pin.href : '',
+        src: el.currentSrc || el.src || el.getAttribute('src') || '',
+        imageTop: rect.top + window.scrollY
+    };
+})
+"""
+
+
 def collect_image_urls(page, downloads, seen_image_urls, cutoff_y=None, iteration=0):
-    images = page.query_selector_all("img[src]")
+    try:
+        images = page.evaluate(COLLECT_IMAGES_SCRIPT)
+    except Exception as collect_error:
+        print(f"Could not read board images this round: {collect_error}")
+        return 0
 
     new_urls = 0
-    for img in images:
-        details = img.evaluate(
-            """
-            el => {
-                let pin = el.closest('a[href*="/pin/"]');
-                if (!pin) {
-                    const card = el.closest('[data-test-id*="pin"], [data-grid-item], [role="listitem"], article');
-                    if (card) {
-                        pin = card.querySelector('a[href*="/pin/"]');
-                    }
-                }
-                const rect = el.getBoundingClientRect();
-                return {
-                    pinHref: pin ? pin.href : '',
-                    src: el.currentSrc || el.src || el.getAttribute('src') || '',
-                    imageTop: rect.top + window.scrollY
-                };
-            }
-            """
-        )
-
+    for details in images:
         image_top = details.get("imageTop")
         if cutoff_y is not None and isinstance(image_top, (int, float)) and image_top >= cutoff_y:
             continue
