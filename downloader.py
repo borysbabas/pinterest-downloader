@@ -16,7 +16,6 @@ SCRAPER_BROWSER_ENGINES = ("firefox", "chromium")
 MAX_SCROLLS = 100
 STALL_LIMIT = 3
 SCROLL_STEP = 4000
-SCROLL_PAUSE_SECONDS = 2
 SCROLL_INCREMENT = 1000
 SCROLL_SETTLE_CHECKS = 2
 SCROLL_SETTLE_SECONDS = 0.8
@@ -44,7 +43,6 @@ IMAGE_LOG_FILE = "found_image_links.log"
 os.makedirs("downloads", exist_ok=True)
 
 PIN_HREF_RE = re.compile(r"/pin/([^/?#]+)/?")
-IMAGE_SIZE_RE = re.compile(r"/\d+x/")
 PINIMG_SIZE_SEGMENT_RE = re.compile(r"/(?:\d+x|originals)/")
 THUMBNAIL_PATH_HINTS = (
     "/75x75_RS/",
@@ -291,6 +289,32 @@ def suggestion_boundary_visible(page):
             return True
 
     return False
+
+
+def current_cutoff_y(page, cutoff_lock_y):
+    if TEST_MODE_ALL_BOARD_PINS:
+        return None
+
+    # Once locked the cutoff must never move: the boundary headings drift down
+    # as more content lazy-loads, and a live value would let recommendations in.
+    if cutoff_lock_y is not None:
+        return cutoff_lock_y
+
+    return recommendation_cutoff_y(page)
+
+
+def maybe_lock_cutoff(page, boundary_seen, cutoff_lock_y):
+    if boundary_seen and cutoff_lock_y is not None:
+        return boundary_seen, cutoff_lock_y
+
+    if not suggestion_boundary_visible(page):
+        return boundary_seen, cutoff_lock_y
+
+    if cutoff_lock_y is None:
+        cutoff_lock_y = recommendation_cutoff_y(page)
+        print(f"Locked board cutoff at y={cutoff_lock_y}")
+
+    return True, cutoff_lock_y
 
 
 def click_first_visible(page, labels, timeout_ms=2000):
@@ -637,11 +661,7 @@ with sync_playwright() as p:
                 print("Stopping because the runtime safety limit was reached.")
                 break
 
-            if TEST_MODE_ALL_BOARD_PINS:
-                cutoff_y = None
-            else:
-                live_cutoff_y = recommendation_cutoff_y(page)
-                cutoff_y = cutoff_lock_y if cutoff_lock_y is not None else live_cutoff_y
+            cutoff_y = current_cutoff_y(page, cutoff_lock_y)
             new_urls = collect_image_urls(
                 page,
                 downloads,
@@ -650,11 +670,7 @@ with sync_playwright() as p:
                 iteration=iteration,
             )
 
-            if suggestion_boundary_visible(page):
-                boundary_seen = True
-                if cutoff_lock_y is None:
-                    cutoff_lock_y = recommendation_cutoff_y(page)
-                    print(f"Locked board cutoff at y={cutoff_lock_y}")
+            boundary_seen, cutoff_lock_y = maybe_lock_cutoff(page, boundary_seen, cutoff_lock_y)
 
             remaining_scroll = SCROLL_STEP
             while remaining_scroll > 0:
@@ -668,17 +684,9 @@ with sync_playwright() as p:
                 except Exception:
                     pass
 
-                if suggestion_boundary_visible(page):
-                    boundary_seen = True
-                    if cutoff_lock_y is None:
-                        cutoff_lock_y = recommendation_cutoff_y(page)
-                        print(f"Locked board cutoff at y={cutoff_lock_y}")
+                boundary_seen, cutoff_lock_y = maybe_lock_cutoff(page, boundary_seen, cutoff_lock_y)
 
-                if TEST_MODE_ALL_BOARD_PINS:
-                    cutoff_y = None
-                else:
-                    live_cutoff_y = recommendation_cutoff_y(page)
-                    cutoff_y = cutoff_lock_y if cutoff_lock_y is not None else live_cutoff_y
+                cutoff_y = current_cutoff_y(page, cutoff_lock_y)
 
                 new_urls += collect_image_urls(
                     page,
@@ -691,11 +699,7 @@ with sync_playwright() as p:
             # One extra settle phase helps capture late-rendered masonry tiles.
             for _ in range(SCROLL_SETTLE_CHECKS):
                 time.sleep(SCROLL_SETTLE_SECONDS)
-                if TEST_MODE_ALL_BOARD_PINS:
-                    cutoff_y = None
-                else:
-                    live_cutoff_y = recommendation_cutoff_y(page)
-                    cutoff_y = cutoff_lock_y if cutoff_lock_y is not None else live_cutoff_y
+                cutoff_y = current_cutoff_y(page, cutoff_lock_y)
                 new_urls += collect_image_urls(
                     page,
                     downloads,
