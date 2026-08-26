@@ -8,7 +8,10 @@ from urllib.parse import urlsplit, urlunsplit
 import requests
 from playwright.sync_api import sync_playwright
 
-BOARD_URL = "https://www.pinterest.com/Raadfxrd/wallpapers/"
+BASE_DIR = Path(__file__).resolve().parent
+DOWNLOADS_DIR = BASE_DIR / "downloads"
+
+BOARD_URL = os.environ.get("PINTEREST_BOARD_URL", "https://www.pinterest.com/Raadfxrd/wallpapers/")
 BOARD_GOTO_TIMEOUT_MS = 45000
 BOARD_GOTO_RETRIES = 3
 BOARD_RETRY_DELAY_SECONDS = 2
@@ -26,13 +29,13 @@ SUGGESTION_BOUNDARY_TEXTS = (
     "More like this",
 )
 ICLOUD_UPLOAD_ENABLED = True
-ICLOUD_ALBUM_NAME = "Pinterest wallpapers"
+ICLOUD_ALBUM_NAME = os.environ.get("ICLOUD_ALBUM_NAME", "Pinterest wallpapers")
 ICLOUD_PHOTOS_URL = "https://www.icloud.com/photos/"
 # Optional deep link to a specific album, e.g.
 #   https://www.icloud.com/photos/#/a,<ALBUM-UUID>/
 # Leave empty to open the library and look the album up by name instead.
 ICLOUD_ALBUM_URL = os.environ.get("ICLOUD_ALBUM_URL", "")
-ICLOUD_STORAGE_STATE_FILE = "icloud_storage_state.json"
+ICLOUD_STORAGE_STATE_FILE = BASE_DIR / "icloud_storage_state.json"
 ICLOUD_UPLOAD_WAIT_TIMEOUT_SECONDS = 900
 ICLOUD_UPLOAD_POLL_SECONDS = 2
 ICLOUD_UPLOAD_STABLE_POLLS = 5
@@ -41,9 +44,9 @@ ICLOUD_FILE_INPUT_WAIT_SECONDS = 30
 DOWNLOAD_TIMEOUT_SECONDS = 30
 DOWNLOAD_CHUNK_BYTES = 65536
 ENABLE_IMAGE_LOGGING = True
-IMAGE_LOG_FILE = "found_image_links.log"
+IMAGE_LOG_FILE = BASE_DIR / "found_image_links.log"
 
-os.makedirs("downloads", exist_ok=True)
+DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 PIN_HREF_RE = re.compile(r"/pin/([^/?#]+)/?")
 PINIMG_SIZE_SEGMENT_RE = re.compile(r"/(?:\d+x|originals)/")
@@ -144,7 +147,7 @@ def image_extension(url, content_type):
     return ".jpg"
 
 
-def download_image(session, url, index, downloads_dir="downloads"):
+def download_image(session, url, index, downloads_dir=DOWNLOADS_DIR):
     with session.get(url, timeout=DOWNLOAD_TIMEOUT_SECONDS, stream=True) as response:
         response.raise_for_status()
         extension = image_extension(url, response.headers.get("Content-Type"))
@@ -613,7 +616,7 @@ def upload_to_icloud_album(playwright, file_paths):
 
     browser = playwright.chromium.launch(headless=False)
     context_kwargs = {}
-    state_path = Path(ICLOUD_STORAGE_STATE_FILE)
+    state_path = ICLOUD_STORAGE_STATE_FILE
     if state_path.exists():
         context_kwargs["storage_state"] = str(state_path)
 
@@ -659,7 +662,7 @@ def upload_to_icloud_album(playwright, file_paths):
 
 
 with sync_playwright() as p:
-    clear_downloads_dir("downloads")
+    clear_downloads_dir(DOWNLOADS_DIR)
     init_image_log()
 
     browser = None
