@@ -6,9 +6,15 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
+from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
 BASE_DIR = Path(__file__).resolve().parent
+
+# Personal values live in .env next to this script; a real environment
+# variable still wins, so CI or a one-off shell export overrides the file.
+load_dotenv(BASE_DIR / ".env")
+
 DOWNLOADS_DIR = BASE_DIR / "downloads"
 
 BOARD_URL = os.environ.get("PINTEREST_BOARD_URL", "https://www.pinterest.com/Raadfxrd/wallpapers/")
@@ -35,7 +41,9 @@ ICLOUD_PHOTOS_URL = "https://www.icloud.com/photos/"
 #   https://www.icloud.com/photos/#/a,<ALBUM-UUID>/
 # Leave empty to open the library and look the album up by name instead.
 ICLOUD_ALBUM_URL = os.environ.get("ICLOUD_ALBUM_URL", "")
-ICLOUD_STORAGE_STATE_FILE = BASE_DIR / "icloud_storage_state.json"
+ICLOUD_STORAGE_STATE_FILE = Path(
+    os.environ.get("ICLOUD_STORAGE_STATE_FILE") or BASE_DIR / "icloud_storage_state.json"
+)
 ICLOUD_UPLOAD_WAIT_TIMEOUT_SECONDS = 900
 ICLOUD_UPLOAD_POLL_SECONDS = 2
 ICLOUD_UPLOAD_STABLE_POLLS = 5
