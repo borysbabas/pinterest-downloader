@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```powershell
 python -m pip install -r requirements.txt
 python -m playwright install          # required once; installs firefox + chromium binaries
+copy .env.example .env                # personal config; gitignored
 python downloader.py                  # the only entry point
 ```
 
@@ -18,9 +19,10 @@ A single-file script (`downloader.py`, ~750 lines) that scrapes images off one P
 downloads them with `requests`, then drives a second browser to upload them to iCloud Photos. Everything is module-level
 procedural code inside one `with sync_playwright() as p:` block at the bottom of the file; the functions above it are
 helpers with no classes or state objects. All configuration is uppercase constants at the top of the file — there is no
-CLI and no config file. Three constants (`BOARD_URL`, `ICLOUD_ALBUM_NAME`, `ICLOUD_ALBUM_URL`) read an env var as an
-override so nothing personal is hardcoded; everything else is edited in place. Paths hang off `BASE_DIR`
-(`Path(__file__).resolve().parent`), so the script does not care about the cwd.
+CLI. Four of them (`BOARD_URL`, `ICLOUD_ALBUM_NAME`, `ICLOUD_ALBUM_URL`, `ICLOUD_STORAGE_STATE_FILE`) read an env var
+so nothing personal is hardcoded; everything else is edited in place. `load_dotenv(BASE_DIR / ".env")` runs before
+those constants are evaluated — keep that ordering. A real env var wins over `.env`, which is what makes a one-off
+shell override work. Paths hang off `BASE_DIR` (`Path(__file__).resolve().parent`), so the cwd does not matter.
 
 Both browsers run **headless=False on purpose** and the iCloud phase **blocks on `input()`** waiting for the user to
 sign in and press Enter. This is an interactive script, not something that can be run unattended or verified end-to-end
@@ -89,4 +91,6 @@ label-clicking, and failing that just uploads into the library.
 - `found_image_links.log` is rewritten on every run when `ENABLE_IMAGE_LOGGING` is on; it's the primary debugging
   artifact for cutoff/collection issues (each line records `imageTop` vs `cutoff`).
 - `icloud_storage_state.json` holds a live iCloud session (real Apple auth cookies). It is gitignored — never commit or
-  share it.
+  share it. `ICLOUD_STORAGE_STATE_FILE` can relocate it outside the repo.
+- `.env` is gitignored and `.env.example` is not. Anything personal belongs in the former; keep the latter to
+  placeholders only.

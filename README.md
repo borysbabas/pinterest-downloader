@@ -7,6 +7,7 @@ Playwright script that scrapes the images off a Pinterest board, downloads them,
 ```powershell
 python -m pip install -r requirements.txt
 python -m playwright install
+copy .env.example .env
 python downloader.py
 ```
 
@@ -26,24 +27,30 @@ Both browsers run visibly on purpose — the iCloud step needs you to sign in by
 
 ## Configuration
 
-Everything lives in the constants at the top of `downloader.py`. The four values that are personal to your setup can
-also be supplied through the environment:
+Anything personal lives in `.env` next to the script, which is gitignored. Copy `.env.example` to get started:
 
-| Variable                | Default                                          | Purpose                          |
-|-------------------------|--------------------------------------------------|----------------------------------|
-| `PINTEREST_BOARD_URL`   | `https://www.pinterest.com/Raadfxrd/wallpapers/` | Board to scrape                  |
-| `ICLOUD_ALBUM_NAME`     | `Pinterest wallpapers`                           | Album to look up by name         |
-| `ICLOUD_ALBUM_URL`      | *(empty)*                                        | Deep link straight to an album   |
+```dotenv
+PINTEREST_BOARD_URL=https://www.pinterest.com/<user>/<board>/
+ICLOUD_ALBUM_NAME=Pinterest wallpapers
+ICLOUD_ALBUM_URL=https://www.icloud.com/photos/#/a,<ALBUM-UUID>/
+```
+
+| Variable                    | Default                                          | Purpose                                 |
+|-----------------------------|--------------------------------------------------|-----------------------------------------|
+| `PINTEREST_BOARD_URL`       | `https://www.pinterest.com/Raadfxrd/wallpapers/` | Board to scrape                         |
+| `ICLOUD_ALBUM_NAME`         | `Pinterest wallpapers`                           | Album to look up by name                |
+| `ICLOUD_ALBUM_URL`          | *(empty)*                                        | Deep link straight to an album          |
+| `ICLOUD_STORAGE_STATE_FILE` | `./icloud_storage_state.json`                    | Where the signed-in session is cached   |
+
+Leave `ICLOUD_ALBUM_URL` empty to land on the library and have the script look the album up by name instead. A real
+environment variable beats whatever `.env` says, so a one-off run can override any of these:
 
 ```powershell
-$env:PINTEREST_BOARD_URL = "https://www.pinterest.com/<user>/<board>/"
-$env:ICLOUD_ALBUM_URL = "https://www.icloud.com/photos/#/a,<ALBUM-UUID>/"
+$env:PINTEREST_BOARD_URL = "https://www.pinterest.com/<user>/<other-board>/"
 python downloader.py
 ```
 
-Leave `ICLOUD_ALBUM_URL` empty to land on the library and have the script look the album up by name instead.
-
-Other constants worth knowing:
+Everything else is an uppercase constant at the top of `downloader.py`:
 
 - `MAX_SCROLLS`, `STALL_LIMIT`, `MAX_RUNTIME_SECONDS` — when the scroll loop gives up.
 - `ICLOUD_UPLOAD_ENABLED` — set to `False` to stop after downloading.
@@ -54,7 +61,7 @@ Other constants worth knowing:
 
 - On the first run the script opens iCloud Photos and waits for you to sign in, then press Enter in the terminal.
 - The session is saved to `icloud_storage_state.json` so later runs skip the login. That file holds live Apple auth
-  cookies — it is gitignored and should stay out of any repository.
+  cookies — it is gitignored, and `ICLOUD_STORAGE_STATE_FILE` can move it outside the repo entirely.
 - The upload never clicks an Upload button. Clicking one opens a native file dialog that Playwright cannot drive on
   Windows, so the script writes straight to the page's `input[type=file]` instead.
 - If album navigation fails because of UI or locale differences, the files still land in your library.
