@@ -37,6 +37,8 @@ ICLOUD_UPLOAD_WAIT_TIMEOUT_SECONDS = 900
 ICLOUD_UPLOAD_POLL_SECONDS = 2
 ICLOUD_UPLOAD_STABLE_POLLS = 5
 ICLOUD_FILE_INPUT_WAIT_SECONDS = 30
+DOWNLOAD_TIMEOUT_SECONDS = 30
+DOWNLOAD_CHUNK_BYTES = 65536
 ENABLE_IMAGE_LOGGING = True
 IMAGE_LOG_FILE = "found_image_links.log"
 
@@ -51,6 +53,7 @@ THUMBNAIL_PATH_HINTS = (
     "/15x15_RS/",
 )
 BOARD_PIN_COUNT_RE = re.compile(r"\b(\d+)\s+Pins?\b", re.IGNORECASE)
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
 
 
 def clear_downloads_dir(downloads_dir):
@@ -124,6 +127,33 @@ def build_image_url_candidates(src):
         candidates.append(base)
 
     return candidates
+
+
+def image_extension(url, content_type):
+    suffix = Path(urlsplit(url).path).suffix.lower()
+    if suffix in IMAGE_EXTENSIONS:
+        return suffix
+
+    subtype = (content_type or "").split(";", 1)[0].strip().lower().removeprefix("image/")
+    if subtype:
+        mapped = ".jpg" if subtype == "jpeg" else f".{subtype}"
+        if mapped in IMAGE_EXTENSIONS:
+            return mapped
+
+    return ".jpg"
+
+
+def download_image(session, url, index, downloads_dir="downloads"):
+    with session.get(url, timeout=DOWNLOAD_TIMEOUT_SECONDS, stream=True) as response:
+        response.raise_for_status()
+        extension = image_extension(url, response.headers.get("Content-Type"))
+        output_path = Path(downloads_dir) / f"img_{index}{extension}"
+        with open(output_path, "wb") as image_file:
+            for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_BYTES):
+                if chunk:
+                    image_file.write(chunk)
+
+    return output_path.resolve()
 
 
 def recommendation_cutoff_y(page):
@@ -737,23 +767,24 @@ with sync_playwright() as p:
         session = requests.Session()
         session.headers.update({"User-Agent": "Mozilla/5.0"})
 
-        for i, (pin_key, candidates) in enumerate(downloads.items()):
-            success = False
+        for pin_key, candidates in downloads.items():
+            saved = False
+            last_error = "no candidate URLs"
             for url in candidates:
                 try:
-                    response = session.get(url, timeout=30)
-                    response.raise_for_status()
-                    output_path = f"downloads/img_{i}.jpg"
-                    with open(output_path, "wb") as f:
-                        f.write(response.content)
-                    downloaded_files.append(str(Path(output_path).resolve()))
-                    success = True
-                    break
-                except Exception:
+                    # Numbered by files actually written, so a pin that fails
+                    # every candidate leaves no gap in the img_<n> sequence.
+                    output_path = download_image(session, url, len(downloaded_files))
+                except Exception as download_error:
+                    last_error = download_error
                     continue
 
-            if not success:
-                print("Failed all candidates for:", pin_key)
+                downloaded_files.append(str(output_path))
+                saved = True
+                break
+
+            if not saved:
+                print(f"Failed all candidates for {pin_key}: {last_error}")
     finally:
         browser.close()
 
