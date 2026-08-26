@@ -36,6 +36,7 @@ ICLOUD_STORAGE_STATE_FILE = "icloud_storage_state.json"
 ICLOUD_UPLOAD_WAIT_TIMEOUT_SECONDS = 900
 ICLOUD_UPLOAD_POLL_SECONDS = 2
 ICLOUD_UPLOAD_STABLE_POLLS = 5
+ICLOUD_UPLOAD_START_GRACE_SECONDS = 30
 ICLOUD_FILE_INPUT_WAIT_SECONDS = 30
 DOWNLOAD_TIMEOUT_SECONDS = 30
 DOWNLOAD_CHUNK_BYTES = 65536
@@ -530,7 +531,7 @@ def accept_icloud_duplicate_prompt(page):
                             const text = buttonText(el);
                             if (!text) return false;
                             if (blockedWords.some((word) => text.includes(word))) return false;
-                            const cls = (el.className || '').toLowerCase();
+                            const cls = (el.getAttribute('class') || '').toLowerCase();
                             return cls.includes('primary') || cls.includes('default') || cls.includes('confirm');
                         });
                         if (primary) {
@@ -553,7 +554,8 @@ def accept_icloud_duplicate_prompt(page):
 
 
 def wait_for_icloud_upload_completion(page):
-    deadline = time.monotonic() + ICLOUD_UPLOAD_WAIT_TIMEOUT_SECONDS
+    start = time.monotonic()
+    deadline = start + ICLOUD_UPLOAD_WAIT_TIMEOUT_SECONDS
     stable_polls = 0
     saw_activity = False
 
@@ -575,7 +577,11 @@ def wait_for_icloud_upload_completion(page):
             print("iCloud upload still in progress...")
         else:
             stable_polls += 1
-            if stable_polls >= ICLOUD_UPLOAD_STABLE_POLLS:
+            # iCloud takes a moment to render its first progress indicator. Without
+            # this grace window the very first polls look idle, the browser closes
+            # and the transfer is killed before it ever started.
+            grace_over = time.monotonic() - start >= ICLOUD_UPLOAD_START_GRACE_SECONDS
+            if stable_polls >= ICLOUD_UPLOAD_STABLE_POLLS and (saw_activity or grace_over):
                 if saw_activity:
                     print("iCloud upload appears finished.")
                 else:
