@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shutil
@@ -22,6 +23,13 @@ BOARD_GOTO_TIMEOUT_MS = 45000
 BOARD_GOTO_RETRIES = 3
 BOARD_RETRY_DELAY_SECONDS = 2
 SCRAPER_BROWSER_ENGINES = ("firefox", "chromium")
+# Pinterest serves a signup/login wall to logged-out visitors instead of the
+# board, so the scraper caches its session the same way the iCloud phase does.
+PINTEREST_STORAGE_STATE_FILE = Path(
+    os.environ.get("PINTEREST_STORAGE_STATE_FILE") or BASE_DIR / "pinterest_storage_state.json"
+)
+PINTEREST_LOGIN_WAIT_ENABLED = True
+PINTEREST_BOARD_READY_TIMEOUT_MS = 20000
 MAX_SCROLLS = 100
 STALL_LIMIT = 3
 SCROLL_STEP = 4000
@@ -253,6 +261,107 @@ def open_board_with_retries(page, board_url):
         "Could not open Pinterest board after retries. "
         f"Tried URLs: {', '.join(urls)}. Last error: {errors[-1] if errors else 'unknown'}"
     )
+
+
+# A board that actually rendered always has pin tiles; the signup wall never
+# does, so tile presence is the reliable "are we logged in enough?" signal.
+BOARD_CONTENT_SELECTOR = 'a[href*="/pin/"]'
+LOGIN_WALL_SELECTORS = (
+    '[data-test-id="registerModal"]',
+    '[data-test-id="signup-modal"]',
+    '[data-test-id="login-modal"]',
+    '[data-test-id="fullPageSignupModal"]',
+)
+
+
+def board_content_visible(page, timeout_ms=PINTEREST_BOARD_READY_TIMEOUT_MS):
+    try:
+        page.wait_for_selector(BOARD_CONTENT_SELECTOR, state="attached", timeout=timeout_ms)
+        return True
+    except Exception:
+        return False
+
+
+def pinterest_wall_reason(page):
+    """Why Pinterest is gating us, or None when the page looks usable."""
+    url = (page.url or "").lower()
+    if "/login" in url or "/signup" in url:
+        return "Pinterest redirected to its login page."
+
+    for selector in LOGIN_WALL_SELECTORS:
+        try:
+            element = page.query_selector(selector)
+            # These nodes can sit hidden in the DOM of a perfectly good board,
+            # so only a *visible* one counts as a wall.
+            if element and element.is_visible():
+                return "Pinterest is showing its signup/login wall over the board."
+        except Exception:
+            continue
+
+    return None
+
+
+def load_pinterest_context_kwargs():
+    state_path = PINTEREST_STORAGE_STATE_FILE
+    if not state_path.exists():
+        return {}
+
+    # A truncated/corrupt file would make new_context() throw for every engine,
+    # which reads as "both browsers are broken"; ignoring it just re-prompts.
+    try:
+        json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception as state_error:
+        print(f"Ignoring unreadable Pinterest session state ({state_error}).")
+        return {}
+
+    print(f"Reusing saved Pinterest session: {state_path}")
+    return {"storage_state": str(state_path)}
+
+
+def save_pinterest_state(context):
+    try:
+        context.storage_state(path=str(PINTEREST_STORAGE_STATE_FILE))
+    except Exception as save_error:
+        print(f"Could not save Pinterest session state: {save_error}")
+
+
+def ensure_pinterest_board_access(context, page):
+    """Block until the board is really rendered, pausing for a manual sign-in.
+
+    Raises so the caller's engine-fallback loop can try the next browser.
+    """
+    # Wait for tiles first; that also gives the wall modal, which appears a
+    # beat after load, time to show up before we judge the page.
+    has_tiles = board_content_visible(page)
+    wall_reason = pinterest_wall_reason(page)
+
+    if has_tiles and not wall_reason:
+        # Refresh the cached cookies while they are known to be good.
+        save_pinterest_state(context)
+        return
+
+    # A modal over a rendered grid still blocks scrolling, so tiles alone are
+    # not enough to call the board usable.
+    print(wall_reason or "The board rendered no pin tiles (Pinterest is gating the page).")
+
+    if not PINTEREST_LOGIN_WAIT_ENABLED:
+        raise RuntimeError("Pinterest board is behind a login wall and interactive sign-in is disabled.")
+
+    print("Sign in to Pinterest in the browser window that just opened.")
+    print("The session is saved afterwards, so later runs should not ask again.")
+    input("Press Enter once you are signed in and can see the board...")
+
+    # The sign-in flow usually lands somewhere else; go back to the board.
+    open_board_with_retries(page, BOARD_URL)
+
+    if not board_content_visible(page):
+        raise RuntimeError(
+            "Still no board pins after sign-in; "
+            + (pinterest_wall_reason(page) or "the board rendered no pin tiles.")
+        )
+
+    save_pinterest_state(context)
+    print("Pinterest session saved.")
 
 
 # Collected in one round-trip: the board holds hundreds of tiles and this runs
@@ -674,6 +783,7 @@ with sync_playwright() as p:
     init_image_log()
 
     browser = None
+    context = None
     page = None
     launch_errors = []
 
@@ -681,8 +791,12 @@ with sync_playwright() as p:
         try:
             browser_type = getattr(p, engine_name)
             browser = browser_type.launch(headless=False)
-            page = browser.new_page()
+            # An explicit context is what lets the saved Pinterest cookies load;
+            # browser.new_page() would always start logged out.
+            context = browser.new_context(**load_pinterest_context_kwargs())
+            page = context.new_page()
             open_board_with_retries(page, BOARD_URL)
+            ensure_pinterest_board_access(context, page)
             print(f"Using {engine_name} for Pinterest scraping.")
             break
         except Exception as engine_error:
@@ -691,6 +805,7 @@ with sync_playwright() as p:
             if browser:
                 browser.close()
             browser = None
+            context = None
             page = None
 
     if not page:

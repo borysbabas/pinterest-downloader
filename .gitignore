@@ -13,6 +13,9 @@ downloads/
 # iCloud session state (contains live Apple auth cookies)
 icloud_storage_state.json
 
+# Pinterest session state (contains live Pinterest auth cookies)
+pinterest_storage_state.json
+
 # Local env files
 .env
 .env.*
