@@ -1,8 +1,21 @@
 # pinterest-downloader
 
-Playwright script that scrapes the images off a Pinterest board, downloads them, and uploads them to iCloud Photos.
+![downloader.py](docs/thumbnail.png)
 
-## Quick start
+A Python script that scrapes the images off a Pinterest board, downloads every pin at the highest resolution Pinterest
+will give, and uploads them to an iCloud Photos album (by default a wallpaper board into *Pinterest wallpapers*). Both
+steps run in a real, visible browser through Playwright, so you can sign in by hand where a site asks for it.
+
+## Stack
+
+| | |
+|---|---|
+| Language | Python 3 |
+| Browser | Playwright: your installed Chrome first, then Playwright's Firefox and Chromium |
+| Downloads | `requests` |
+| Config | `.env` via `python-dotenv`, plus constants at the top of `downloader.py` |
+
+## Getting started
 
 ```powershell
 python -m pip install -r requirements.txt
@@ -111,3 +124,13 @@ Enter before the browser closes — closing it early is what kills an upload sti
 
 `found_image_links.log` is rewritten on every run and records `imageTop` against `cutoff` for each collected image. It
 is the first place to look when pins are missing or recommendations slip through.
+
+## Project structure
+
+| Path | |
+|---|---|
+| `downloader.py` | The whole script: Pinterest session, scroll and collect, download, iCloud upload |
+| `.env.example` | Board, album and session-file settings to copy into `.env` |
+| `requirements.txt` | Playwright, requests and python-dotenv |
+| `downloads/` | Where the images land; emptied at the start of each run |
+| `found_image_links.log` | Written on each run, for debugging missing pins |
